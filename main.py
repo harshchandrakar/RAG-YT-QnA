@@ -104,6 +104,22 @@ st.markdown("""
         border-radius: 10px;
         margin: 0.5rem 0;
     }
+    
+    .error-box {
+        background: #ffebee;
+        border: 1px solid #f44336;
+        border-radius: 10px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
+    
+    .success-box {
+        background: #e8f5e8;
+        border: 1px solid #4caf50;
+        border-radius: 10px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -143,15 +159,26 @@ def initialize_session_state():
         st.session_state.chat_history = []
     if 'current_video_url' not in st.session_state:
         st.session_state.current_video_url = ""
+    if 'last_error' not in st.session_state:
+        st.session_state.last_error = None
 
 def process_video(url, language_code, splitter, embeddings, llm, prompt, parser):
     """Process YouTube video and create QA chain"""
     try:
+        # Clear any previous errors
+        st.session_state.last_error = None
+        
         with st.spinner("🎬 Extracting transcript..."):
             transcript = transcribe_extractor(url, language_code)
         
+        if not transcript or len(transcript.strip()) < 50:
+            raise Exception("Transcript is too short or empty. The video might not have captions.")
+        
         with st.spinner("📄 Processing transcript..."):
             chunks = splitter.create_documents([transcript])
+        
+        if not chunks:
+            raise Exception("Failed to create document chunks from transcript.")
         
         with st.spinner("🔍 Creating vector database..."):
             vector_store = FAISS.from_documents(chunks, embeddings)
@@ -168,7 +195,20 @@ def process_video(url, language_code, splitter, embeddings, llm, prompt, parser)
         return main_chain, transcript[:500] + "..." if len(transcript) > 500 else transcript
     
     except Exception as e:
-        st.error(f"Error processing video: {str(e)}")
+        error_msg = str(e)
+        st.session_state.last_error = error_msg
+        st.error(f"❌ Error processing video: {error_msg}")
+        
+        # Provide helpful suggestions based on error type
+        if "available languages" in error_msg.lower():
+            st.info("💡 **Tip**: Try selecting a different language from the dropdown, or the video might have captions in a different language than expected.")
+        elif "no captions" in error_msg.lower():
+            st.info("💡 **Tip**: This video doesn't have captions/subtitles available. Try a different video that has captions enabled.")
+        elif "invalid youtube url" in error_msg.lower():
+            st.info("💡 **Tip**: Please check the YouTube URL format. It should be like: https://www.youtube.com/watch?v=VIDEO_ID")
+        else:
+            st.info("💡 **Tip**: Try a different video or check if the video has captions enabled. Some videos may not be accessible due to restrictions.")
+        
         return None, None
 
 def streamlit_main():
@@ -183,6 +223,11 @@ def streamlit_main():
     # Sidebar for video input
     with st.sidebar:
         st.header("🎬 Video Settings")
+        
+        # Show last error if any
+        if st.session_state.last_error:
+            with st.expander("⚠️ Last Error Details", expanded=False):
+                st.error(st.session_state.last_error)
         
         # YouTube URL input
         video_url = st.text_input(
@@ -233,7 +278,23 @@ def streamlit_main():
             st.session_state.video_processed = False
             st.session_state.chat_history = []
             st.session_state.current_video_url = ""
+            st.session_state.last_error = None
             st.success("Reset completed!")
+        
+        # Troubleshooting section
+        with st.expander("🔧 Troubleshooting Tips"):
+            st.markdown("""
+            **Common Issues:**
+            - **No captions**: Video must have captions/subtitles
+            - **Language mismatch**: Select correct video language
+            - **Private videos**: Must be public videos
+            - **Recent videos**: Very new videos might not have captions yet
+            
+            **Supported Video Types:**
+            - Public YouTube videos with captions
+            - Videos with auto-generated subtitles
+            - Videos with manual captions in multiple languages
+            """)
     
     # Main content area
     col1, col2 = st.columns([2, 1])
@@ -328,104 +389,6 @@ def streamlit_main():
             
             Simply paste a YouTube URL, select the language, and start asking questions!
             """)
-
-def cli_main():
-    """Original CLI version of the app"""
-    print("🎥 YouTube Transcript Q&A - CLI Version")
-    print("=" * 50)
-    
-    # Initialize components
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.3)
-    
-    prompt = PromptTemplate(
-        template="""
-        You are a helpful assistant.
-        Answer ONLY from the provided transcript context.
-        If the context is insufficient, just say you don't know.
-        
-        {context}
-        Question: {question}
-        """,
-        input_variables=['context', 'question']
-    )
-    
-    parser = StrOutputParser()
-    
-    # Get video URL and language
-    url = input("🔗 Enter YouTube URL: ")
-    
-    print("\n🌍 Available Languages:")
-    for code, lang in common_language_codes.items():
-        print(f"  {code}: {lang}")
-    
-    lang_code = input("\n🔤 Enter language code (default: en): ").strip() or "en"
-    
-    if lang_code not in common_language_codes:
-        print(f"❌ Invalid language code. Using 'en' (English)")
-        lang_code = "en"
-    
-    print(f"\n🎬 Processing video in {common_language_codes[lang_code]}...")
-    
-    try:
-        # Extract transcript
-        transcript = transcribe_extractor(url, lang_code)
-        print("✅ Transcript extracted successfully!")
-        
-        # Process transcript
-        chunks = splitter.create_documents([transcript])
-        vector_store = FAISS.from_documents(chunks, embeddings)
-        retriever = vector_store.as_retriever(search_type="mmr", search_kwargs={"k": 4})
-        
-        # Create QA chain
-        parallel_chain = RunnableParallel({
-            'context': retriever | RunnableLambda(format_docs),
-            'question': RunnablePassthrough()
-        })
-        
-        main_chain = parallel_chain | prompt | llm | parser
-        print("✅ Q&A system ready!")
-        
-        # Q&A loop
-        print("\n💬 You can now ask questions! (Type 'quit' to exit)")
-        print("-" * 50)
-        
-        question_count = 0
-        while True:
-            question = input(f"\n🤔 Question {question_count + 1}: ").strip()
-            
-            if question.lower() in ['quit', 'exit', 'q']:
-                print("👋 Goodbye!")
-                break
-            
-            if not question:
-                print("⚠️ Please enter a question!")
-                continue
-            
-            try:
-                print("🤖 Thinking...")
-                answer = main_chain.invoke(question)
-                print(f"\n📝 Answer: {answer}")
-                question_count += 1
-                
-            except Exception as e:
-                print(f"❌ Error: {str(e)}")
-        
-    except Exception as e:
-        print(f"❌ Error processing video: {str(e)}")
-
-def main():
-    """Main function that determines whether to run CLI or Streamlit version"""
-    try:
-        # Try to import streamlit and check if we're in a Streamlit context
-        import streamlit as st
-        # If we can access st.session_state, we're in Streamlit context
-        _ = st.session_state
-        streamlit_main()
-    except:
-        # If we can't access Streamlit context, run CLI version
-        print("not working")
 
 if __name__ == "__main__":
     streamlit_main()

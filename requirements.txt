@@ -6,3 +6,5 @@ faiss-cpu
 youtube-transcript-api
 python-dotenv
 google-generativeai
+requests
+watchdog
